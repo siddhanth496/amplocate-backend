@@ -20,7 +20,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
-    description="Voltara — EV charging discovery, reliability intelligence, and trip planning.",
+    description="Amplocate — EV charging discovery, reliability intelligence, and trip planning.",
     lifespan=lifespan,
 )
 

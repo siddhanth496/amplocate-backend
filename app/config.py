@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    app_name: str = "Voltara API"
+    app_name: str = "Amplocate API"
     database_url: str = "sqlite+aiosqlite:///./voltara.db"
     jwt_secret: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
