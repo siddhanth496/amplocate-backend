@@ -215,3 +215,48 @@ async def test_trip_2w_short_range(auth_client):
     plan = r.json()
     # Ola S1 Pro (~85 km safe range) cannot make 180 km with no compatible corridor chargers
     assert plan["feasible"] is False
+
+
+async def test_trip_multi_stop_with_waypoint(auth_client):
+    """BLR -> Mandya (waypoint) -> Mysuru at 55%: per-leg planning with alternatives."""
+    await seed_chargers(auth_client)
+    v = await add_vehicle(auth_client, soc=55)
+    r = await auth_client.post("/trips/plan", json={
+        "origin": BLR,
+        "destination": {"lat": 12.3050, "lng": 76.6550},
+        "waypoints": [{"lat": 12.5240, "lng": 76.8960}],  # Mandya
+        "vehicle_id": v["id"],
+    })
+    assert r.status_code == 200, r.text
+    plan = r.json()
+    assert plan["feasible"] is True, plan
+    # every stop carries a leg index and suggestion list
+    for s in plan["stops"]:
+        assert s["leg_index"] in (0, 1)
+        assert isinstance(s["alternatives"], list)
+        assert s["arrival_soc"] >= 15.0
+    assert plan["destination_arrival_soc"] >= 15.0
+
+
+async def test_trip_pinned_charger_swap(auth_client):
+    """Pinning an alternative charger for a leg makes it the chosen stop."""
+    await seed_chargers(auth_client)
+    v = await add_vehicle(auth_client, soc=60)
+    base = {
+        "origin": BLR,
+        "destination": {"lat": 12.3050, "lng": 76.6550},
+        "vehicle_id": v["id"],
+    }
+    r = await auth_client.post("/trips/plan", json=base)
+    plan = r.json()
+    assert plan["feasible"], plan
+    stop = plan["stops"][0]
+    if not stop["alternatives"]:
+        return  # nothing to swap with in the seed set
+    alt_id = stop["alternatives"][0]["charger"]["id"]
+    r = await auth_client.post("/trips/plan", json={
+        **base, "pinned_chargers": {str(stop["leg_index"]): alt_id},
+    })
+    plan2 = r.json()
+    assert plan2["feasible"], plan2
+    assert plan2["stops"][0]["charger"]["id"] == alt_id

@@ -158,26 +158,27 @@ def _score(cand: Candidate, vehicle: Vehicle, max_price: float, detour_limit: fl
     )
 
 
-async def plan_trip(db: AsyncSession, origin: tuple[float, float], dest: tuple[float, float],
-                    vehicle: Vehicle, departure_soc: float) -> dict:
+async def _plan_leg(db: AsyncSession, origin: tuple[float, float], dest: tuple[float, float],
+                    vehicle: Vehicle, departure_soc: float,
+                    pinned_charger_id: Optional[str] = None) -> dict:
+    """Plan one leg. Returns {feasible, stop|None, alternatives, arrival_soc, route,
+    warnings, note, rel_score}."""
     route = await get_router().route(origin, dest)
     model = EnergyModel.build(vehicle, route)
     warnings: list[str] = []
 
-    # Step 1: feasibility without charging
     trip_drop = model.soc_drop(route.distance_km)
     if departure_soc >= trip_drop + settings.target_arrival_soc:
-        return _plan(feasible=True, stops=[], route=route,
-                     arrival_soc=departure_soc - trip_drop,
-                     confidence="high", note="No charging needed", warnings=warnings)
+        return dict(feasible=True, stop=None, alternatives=[], route=route,
+                    arrival_soc=round(departure_soc - trip_drop, 1),
+                    warnings=warnings, note=None, rel_score=None)
 
-    # Vehicle can't reach any charger at all?
     if model.safe_range_km(departure_soc) <= 0:
-        return _plan(feasible=False, stops=[], route=route, arrival_soc=None,
-                     confidence="low",
-                     note="Battery below safe reserve — charge before departing", warnings=warnings)
+        return dict(feasible=False, stop=None, alternatives=[], route=route, arrival_soc=None,
+                    warnings=warnings, rel_score=None,
+                    note="Battery below safe reserve — charge before departing")
 
-    # Step 2: charging window along the route
+    # charging window along the route
     soc_to_50 = max(departure_soc - 50.0, 0.0)
     earliest_km = soc_to_50 / trip_drop * route.distance_km if trip_drop > 0 else 0.0
     latest_km = model.safe_range_km(departure_soc)
@@ -185,18 +186,14 @@ async def plan_trip(db: AsyncSession, origin: tuple[float, float], dest: tuple[f
         earliest_km = 0.0
     latest_km = min(latest_km, route.distance_km)
 
-    # sample the polyline; scale cumulative distances so they match the (road)
-    # route distance rather than raw polyline geometry
     all_samples = sample_polyline(route.points, step_km=2.0)
     polyline_km = all_samples[-1][2] if all_samples else 0.0
     scale = route.distance_km / polyline_km if polyline_km > 0 else 1.0
     all_samples = [(s[0], s[1], s[2] * scale) for s in all_samples]
-
     samples = [s for s in all_samples if earliest_km <= s[2] <= latest_km]
     if not samples:
         samples = [s for s in all_samples if s[2] <= latest_km]
 
-    # Fallback ladder (spec §4): widen detour → lower reliability → 2-stop hint → give up
     ladder = [
         (settings.max_detour_km, settings.min_reliability, None),
         (8.0, settings.min_reliability, "Widened search corridor to 8 km"),
@@ -212,19 +209,95 @@ async def plan_trip(db: AsyncSession, origin: tuple[float, float], dest: tuple[f
             max_price = max((c.charger.price_per_kwh or 0) for c in candidates) or 0
             for c in candidates:
                 c.score = _score(c, vehicle, max_price, detour_limit)
-            best = max(candidates, key=lambda c: c.score)
-            stop = _build_stop(best, model, vehicle, route)
-            confidence = "high" if best.rel_score >= 0.85 and not warnings else (
-                "medium" if best.rel_score >= settings.min_reliability else "low")
-            return _plan(feasible=True, stops=[stop], route=route,
-                         arrival_soc=stop["destination_arrival_soc"],
-                         confidence=confidence, note=None, warnings=warnings,
-                         extra_minutes=stop["dwell_minutes"] + stop["detour_km"] / 30 * 60 * 2)
+            candidates.sort(key=lambda c: c.score, reverse=True)
 
-    return _plan(
-        feasible=False, stops=[], route=route, arrival_soc=None, confidence="low",
-        note=("No safe single-stop plan found. Consider charging before departure "
-              "or splitting the trip into two shorter charge stops."),
+            best = candidates[0]
+            if pinned_charger_id:
+                pinned = next((c for c in candidates if c.charger.id == pinned_charger_id), None)
+                if pinned is not None:
+                    best = pinned
+                else:
+                    warnings.append("Your chosen charger isn't viable for this leg — using the best option instead")
+
+            stop = _build_stop(best, model, vehicle, route)
+            alternatives = [
+                _build_stop(c, model, vehicle, route)
+                for c in candidates if c.charger.id != best.charger.id
+            ][:3]
+            return dict(feasible=True, stop=stop, alternatives=alternatives, route=route,
+                        arrival_soc=stop["destination_arrival_soc"],
+                        warnings=warnings, note=None, rel_score=best.rel_score)
+
+    return dict(
+        feasible=False, stop=None, alternatives=[], route=route, arrival_soc=None,
+        warnings=warnings, rel_score=None,
+        note=("No safe charging stop found on this leg. Consider charging before it "
+              "or adding an intermediate stop."),
+    )
+
+
+async def plan_trip(db: AsyncSession, origin: tuple[float, float], dest: tuple[float, float],
+                    vehicle: Vehicle, departure_soc: float,
+                    waypoints: Optional[list[tuple[float, float]]] = None,
+                    pinned_chargers: Optional[dict[int, str]] = None) -> dict:
+    """Multi-leg risk-free planner: origin → waypoints… → destination.
+    Each leg may add one charging stop; pinned_chargers[leg_index] forces a
+    specific (viable) charger for that leg."""
+    points = [origin, *(waypoints or []), dest]
+    pinned_chargers = pinned_chargers or {}
+
+    soc = departure_soc
+    stops: list[dict] = []
+    warnings: list[str] = []
+    total_km = 0.0
+    drive_min = 0.0
+    extra_min = 0.0
+    worst_rel: Optional[float] = None
+
+    for i in range(len(points) - 1):
+        leg = await _plan_leg(db, points[i], points[i + 1], vehicle, soc,
+                              pinned_charger_id=pinned_chargers.get(i))
+        total_km += leg["route"].distance_km
+        drive_min += leg["route"].duration_minutes
+        warnings.extend(leg["warnings"])
+
+        if not leg["feasible"]:
+            note = leg["note"] or "Leg not plannable"
+            if len(points) > 2:
+                note = f"Leg {i + 1} ({'start' if i == 0 else f'stop {i}'} → {'destination' if i == len(points) - 2 else f'stop {i + 1}'}): {note}"
+            return dict(
+                feasible=False, stops=stops, destination_arrival_soc=None,
+                total_distance_km=round(total_km, 1), drive_minutes=round(drive_min, 1),
+                total_trip_minutes=None, confidence="low", note=note, warnings=warnings,
+            )
+
+        if leg["stop"] is not None:
+            leg["stop"]["leg_index"] = i
+            leg["stop"]["alternatives"] = leg["alternatives"]
+            stops.append(leg["stop"])
+            extra_min += leg["stop"]["dwell_minutes"] + leg["stop"]["detour_km"] / 30 * 60 * 2
+            if worst_rel is None or leg["rel_score"] < worst_rel:
+                worst_rel = leg["rel_score"]
+        soc = leg["arrival_soc"]
+
+    if worst_rel is None:
+        confidence = "high"
+    elif worst_rel >= 0.85 and not warnings:
+        confidence = "high"
+    elif worst_rel >= settings.min_reliability:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    return dict(
+        feasible=True,
+        stops=stops,
+        destination_arrival_soc=round(soc, 1),
+        total_distance_km=round(total_km, 1),
+        drive_minutes=round(drive_min, 1),
+        total_trip_minutes=round(drive_min + extra_min, 1),
+        confidence=confidence,
+        note="No charging needed" if not stops else None,
         warnings=warnings,
     )
 

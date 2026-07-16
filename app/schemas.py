@@ -168,6 +168,9 @@ class TripPlanRequest(BaseModel):
     destination: LatLng
     vehicle_id: str
     departure_soc: Optional[float] = Field(default=None, ge=0, le=100)
+    waypoints: list[LatLng] = []
+    # leg_index -> charger_id: force a specific (viable) charger for that leg
+    pinned_chargers: dict[str, str] = {}
 
 
 class TripStop(BaseModel):
@@ -178,6 +181,8 @@ class TripStop(BaseModel):
     energy_to_add_kwh: float
     estimated_cost: Optional[float]
     backup_charger: Optional[ChargerOut]
+    leg_index: int = 0
+    alternatives: list["TripStop"] = []
 
 
 class TripPlan(BaseModel):
