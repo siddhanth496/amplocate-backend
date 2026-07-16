@@ -292,3 +292,46 @@ async def test_manual_vehicle_creation(auth_client):
     assert r.status_code == 201, r.text
     v = r.json()
     assert v["make"] == "Citroen" and v["battery_kwh"] == 29.2
+
+
+async def test_infeasible_trip_offers_reachable_suggestions(auth_client):
+    """BLR -> Mysuru at 40%: not single-stop plannable, but reachable chargers
+    along the way must be suggested so the user can hop."""
+    await seed_chargers(auth_client)
+    v = await add_vehicle(auth_client, soc=40)
+    r = await auth_client.post("/trips/plan", json={
+        "origin": BLR,
+        "destination": {"lat": 12.3050, "lng": 76.6550},
+        "vehicle_id": v["id"],
+    })
+    plan = r.json()
+    assert plan["feasible"] is False
+    assert len(plan["suggestions"]) >= 1, plan
+    for s in plan["suggestions"]:
+        assert s["arrival_soc"] >= 15.0          # reachable within reserve
+        assert s["leg_index"] == 0
+
+
+async def test_hop_via_waypoint_charge_makes_trip_feasible(auth_client):
+    """The full hop flow: infeasible at 40% -> take a suggestion -> add it as a
+    waypoint WITH a charge declaration -> trip becomes feasible."""
+    await seed_chargers(auth_client)
+    v = await add_vehicle(auth_client, soc=40)
+    base = {"origin": BLR, "destination": {"lat": 12.3050, "lng": 76.6550}, "vehicle_id": v["id"]}
+
+    r = await auth_client.post("/trips/plan", json=base)
+    plan = r.json()
+    assert plan["feasible"] is False and plan["suggestions"], plan
+    sug = plan["suggestions"][0]
+
+    r = await auth_client.post("/trips/plan", json={
+        **base,
+        "waypoints": [{"lat": sug["charger"]["lat"], "lng": sug["charger"]["lng"]}],
+        "waypoint_charges": {"0": sug["charger"]["id"]},
+    })
+    plan2 = r.json()
+    assert plan2["feasible"] is True, plan2
+    # the waypoint charge appears as a stop and battery math carries through
+    wp_stops = [s for s in plan2["stops"] if s["charger"]["id"] == sug["charger"]["id"]]
+    assert wp_stops and wp_stops[0]["target_soc"] == 80.0
+    assert plan2["destination_arrival_soc"] >= 15.0

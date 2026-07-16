@@ -171,6 +171,9 @@ class TripPlanRequest(BaseModel):
     waypoints: list[LatLng] = []
     # leg_index -> charger_id: force a specific (viable) charger for that leg
     pinned_chargers: dict[str, str] = {}
+    # waypoint_index -> charger_id: user will charge to 80% at this charger
+    # when reaching that waypoint (multi-hop for otherwise-unplannable trips)
+    waypoint_charges: dict[str, str] = {}
 
 
 class TripStop(BaseModel):
@@ -188,6 +191,9 @@ class TripStop(BaseModel):
 class TripPlan(BaseModel):
     feasible: bool
     stops: list[TripStop]
+    # when infeasible: chargers reachable right now along the failing leg,
+    # so the user can add one as an intermediate stop and replan
+    suggestions: list[TripStop] = []
     destination_arrival_soc: Optional[float]
     total_distance_km: float
     drive_minutes: float

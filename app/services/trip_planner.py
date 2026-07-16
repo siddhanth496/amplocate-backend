@@ -228,23 +228,59 @@ async def _plan_leg(db: AsyncSession, origin: tuple[float, float], dest: tuple[f
                         arrival_soc=stop["destination_arrival_soc"],
                         warnings=warnings, note=None, rel_score=best.rel_score)
 
+    # Best-effort: no single stop completes this leg, but show chargers the
+    # vehicle CAN safely reach right now — the user can add one as an
+    # intermediate stop and replan from there (manual multi-hop).
+    reachable: list[dict] = []
+    cands = await _corridor_chargers(db, samples, 8.0)
+    seen: set[str] = set()
+    for c in cands:
+        if c.id in seen or not _connector_match(c, vehicle):
+            continue
+        if c.status == ChargerStatus.BROKEN.value:
+            continue
+        arrival = departure_soc - model.soc_drop(c._route_km + c._detour_km)
+        if arrival < settings.reserve_soc:
+            continue
+        seen.add(c.id)
+        cand = Candidate(
+            charger=c, rel_score=reliability.effective_score(c.reliability),
+            route_km=c._route_km, detour_km=c._detour_km,
+            arrival_soc=round(arrival, 1),
+            dist_from_origin_km=c._route_km + c._detour_km,
+            dist_to_dest_km=(route.distance_km - c._route_km) + c._detour_km,
+        )
+        # never suggest a dead end — the escape-route rule applies here too
+        if await _has_backup(db, cand, vehicle, model, settings.max_charge_soc, 0.5) is None:
+            continue
+        reachable.append(_build_stop(cand, model, vehicle, route))
+    # furthest along the route first — most progress toward the destination
+    reachable.sort(key=lambda s: s["destination_arrival_soc"], reverse=True)
+
     return dict(
         feasible=False, stop=None, alternatives=[], route=route, arrival_soc=None,
-        warnings=warnings, rel_score=None,
-        note=("No safe charging stop found on this leg. Consider charging before it "
-              "or adding an intermediate stop."),
+        warnings=warnings, rel_score=None, suggestions=reachable[:5],
+        note=("No single charging stop can safely complete this leg. "
+              "Add one of the reachable chargers below as a stop, charge there, and continue."),
     )
 
 
 async def plan_trip(db: AsyncSession, origin: tuple[float, float], dest: tuple[float, float],
                     vehicle: Vehicle, departure_soc: float,
                     waypoints: Optional[list[tuple[float, float]]] = None,
-                    pinned_chargers: Optional[dict[int, str]] = None) -> dict:
+                    pinned_chargers: Optional[dict[int, str]] = None,
+                    waypoint_charges: Optional[dict[int, str]] = None) -> dict:
     """Multi-leg risk-free planner: origin → waypoints… → destination.
     Each leg may add one charging stop; pinned_chargers[leg_index] forces a
-    specific (viable) charger for that leg."""
+    specific (viable) charger for that leg; waypoint_charges[waypoint_index]
+    declares the user will charge (to 80%) at that charger upon reaching the
+    waypoint — the hop mechanic for otherwise-unplannable trips."""
+    from sqlalchemy import select as _select
+    from ..models import Charger as _Charger
+
     points = [origin, *(waypoints or []), dest]
     pinned_chargers = pinned_chargers or {}
+    waypoint_charges = waypoint_charges or {}
 
     soc = departure_soc
     stops: list[dict] = []
@@ -265,10 +301,14 @@ async def plan_trip(db: AsyncSession, origin: tuple[float, float], dest: tuple[f
             note = leg["note"] or "Leg not plannable"
             if len(points) > 2:
                 note = f"Leg {i + 1} ({'start' if i == 0 else f'stop {i}'} → {'destination' if i == len(points) - 2 else f'stop {i + 1}'}): {note}"
+            suggestions = leg.get("suggestions", [])
+            for s in suggestions:
+                s["leg_index"] = i
             return dict(
                 feasible=False, stops=stops, destination_arrival_soc=None,
                 total_distance_km=round(total_km, 1), drive_minutes=round(drive_min, 1),
                 total_trip_minutes=None, confidence="low", note=note, warnings=warnings,
+                suggestions=suggestions,
             )
 
         if leg["stop"] is not None:
@@ -279,6 +319,35 @@ async def plan_trip(db: AsyncSession, origin: tuple[float, float], dest: tuple[f
             if worst_rel is None or leg["rel_score"] < worst_rel:
                 worst_rel = leg["rel_score"]
         soc = leg["arrival_soc"]
+
+        # User declared they'll charge at this waypoint (hop mechanic)
+        is_waypoint = i < len(points) - 2
+        if is_waypoint and i in waypoint_charges:
+            charger = (
+                await db.execute(
+                    _select(_Charger).options(selectinload(_Charger.reliability))
+                    .where(_Charger.id == waypoint_charges[i])
+                )
+            ).scalar_one_or_none()
+            if charger is not None and _connector_match(charger, vehicle):
+                target = settings.max_charge_soc
+                energy = vehicle.battery_kwh * max(target - soc, 0) / 100
+                power = _best_power_kw(charger, vehicle) * CHARGE_EFFICIENCY
+                dwell = energy / power * 60 if power > 0 else 0
+                rel_score = reliability.effective_score(charger.reliability)
+                stops.append(dict(
+                    charger=charger, backup_charger=None,
+                    arrival_soc=round(soc, 1), target_soc=target,
+                    energy_to_add_kwh=round(energy, 2),
+                    dwell_minutes=round(dwell, 1),
+                    estimated_cost=round(energy * charger.price_per_kwh, 2) if charger.price_per_kwh else None,
+                    detour_km=0.0, destination_arrival_soc=target,
+                    leg_index=i, alternatives=[],
+                ))
+                extra_min += dwell
+                soc = target
+                if worst_rel is None or rel_score < worst_rel:
+                    worst_rel = rel_score
 
     if worst_rel is None:
         confidence = "high"

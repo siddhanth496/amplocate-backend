@@ -55,7 +55,9 @@ async def plan(
         departure_soc,
         waypoints=[(w.lat, w.lng) for w in body.waypoints],
         pinned_chargers={int(k): v for k, v in (body.pinned_chargers or {}).items()},
+        waypoint_charges={int(k): v for k, v in (body.waypoint_charges or {}).items()},
     )
 
     result["stops"] = [_serialize_stop(s) for s in result["stops"]]
+    result["suggestions"] = [_serialize_stop(s) for s in result.get("suggestions", [])]
     return result
