@@ -38,3 +38,26 @@ async def import_region(body: RegionImport, user: User = Depends(get_current_use
     _dev_only()
     asyncio.create_task(import_regions([(body.name, body.lat, body.lng, body.radius_km)]))
     return {"status": "started", "region": body.name}
+
+
+@router.get("/import/status")
+async def import_status(user: User = Depends(get_current_user)):
+    """Charger count + result of the last import run (incl. per-region errors)."""
+    _dev_only()
+    from sqlalchemy import func, select
+    from ..database import SessionLocal
+    from ..models import Charger
+    from ..seed.regions import STATUS
+
+    async with SessionLocal() as db:
+        total = (await db.execute(select(func.count(Charger.id)))).scalar()
+        imported = (
+            await db.execute(select(func.count(Charger.id)).where(Charger.external_id.isnot(None)))
+        ).scalar()
+    return {
+        "total_chargers": total,
+        "imported_chargers": imported,
+        "import_running": STATUS["running"],
+        "last_run": STATUS["last_run"],
+        "ocm_api_key_configured": bool(settings.ocm_api_key),
+    }

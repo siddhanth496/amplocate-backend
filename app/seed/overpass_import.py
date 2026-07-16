@@ -17,7 +17,11 @@ from ..database import SessionLocal, init_db
 from ..models import Charger, ReliabilityScore
 from ..services.geo import haversine_km
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",  # mirror — main server rate-limits cloud IPs
+    "https://overpass.osm.jp/api/interpreter",
+]
 
 # OSM socket:* keys → our connector enum
 OSM_SOCKET_MAP = {
@@ -69,7 +73,9 @@ def to_charger(el: dict) -> Optional[Charger]:
         connectors = [{"type": "Type2_AC", "power_kw": 7.4, "count": 1}]
 
     operator = tags.get("operator") or tags.get("brand") or "Unknown"
-    name = tags.get("name") or f"{operator} Charging Station" if operator != "Unknown" else "EV Charging Station"
+    name = tags.get("name") or (
+        f"{operator} Charging Station" if operator != "Unknown" else "EV Charging Station"
+    )
     return Charger(
         external_id=f"osm-{el['type']}-{el['id']}",
         name=name,
@@ -92,10 +98,17 @@ async def fetch(south: float, west: float, north: float, east: float) -> list[di
       way["amenity"="charging_station"]({south},{west},{north},{east}); );
     out body center;
     """
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(OVERPASS_URL, data={"data": query}, timeout=120)
-        resp.raise_for_status()
-        return resp.json().get("elements", [])
+    last_err: Optional[Exception] = None
+    async with httpx.AsyncClient(headers={"User-Agent": "Amplocate/0.1 (EV charging discovery)"}) as client:
+        for url in OVERPASS_URLS:
+            try:
+                resp = await client.post(url, data={"data": query}, timeout=120)
+                resp.raise_for_status()
+                return resp.json().get("elements", [])
+            except Exception as e:  # noqa: BLE001 — try the next mirror
+                print(f"Overpass {url} failed: {e}", flush=True)
+                last_err = e
+    raise last_err if last_err else RuntimeError("No Overpass endpoint available")
 
 
 async def run(south: float, west: float, north: float, east: float) -> int:

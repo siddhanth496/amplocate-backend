@@ -24,18 +24,36 @@ def bbox_around(lat: float, lng: float, radius_km: float) -> tuple[float, float,
     return lat - dlat, lng - dlng, lat + dlat, lng + dlng  # south, west, north, east
 
 
+# In-memory status for the /admin/import/status endpoint
+STATUS: dict = {"running": False, "last_run": None}
+
+
 async def import_regions(regions=NCR_REGIONS) -> dict:
     """Run both importers per region. Idempotent: external-id + 75 m proximity dedupe."""
-    totals = {"ocm": 0, "osm": 0, "errors": []}
-    for name, lat, lng, radius in regions:
-        try:
-            totals["ocm"] += await ocm_import.run(lat, lng, radius, max_results=500)
-        except Exception as e:  # noqa: BLE001 — one source failing shouldn't kill the run
-            totals["errors"].append(f"OCM {name}: {e}")
-        try:
-            south, west, north, east = bbox_around(lat, lng, radius)
-            totals["osm"] += await overpass_import.run(south, west, north, east)
-        except Exception as e:  # noqa: BLE001
-            totals["errors"].append(f"OSM {name}: {e}")
-    print(f"Region import done: +{totals['ocm']} OCM, +{totals['osm']} OSM, {len(totals['errors'])} errors")
+    import traceback
+    from datetime import datetime, timezone
+
+    totals = {"ocm": 0, "osm": 0, "errors": [], "started_at": datetime.now(timezone.utc).isoformat()}
+    STATUS["running"] = True
+    try:
+        for name, lat, lng, radius in regions:
+            try:
+                totals["ocm"] += await ocm_import.run(lat, lng, radius, max_results=500)
+            except Exception as e:  # noqa: BLE001 — one source failing shouldn't kill the run
+                totals["errors"].append(f"OCM {name}: {type(e).__name__}: {e}")
+                print(f"OCM {name} failed: {e}", flush=True)
+            try:
+                south, west, north, east = bbox_around(lat, lng, radius)
+                totals["osm"] += await overpass_import.run(south, west, north, east)
+            except Exception as e:  # noqa: BLE001
+                totals["errors"].append(f"OSM {name}: {type(e).__name__}: {e}")
+                print(f"OSM {name} failed: {e}", flush=True)
+    except Exception:  # noqa: BLE001 — never lose the traceback silently
+        totals["errors"].append(traceback.format_exc())
+        print(traceback.format_exc(), flush=True)
+    finally:
+        totals["finished_at"] = datetime.now(timezone.utc).isoformat()
+        STATUS["running"] = False
+        STATUS["last_run"] = totals
+    print(f"Region import done: +{totals['ocm']} OCM, +{totals['osm']} OSM, {len(totals['errors'])} errors", flush=True)
     return totals
