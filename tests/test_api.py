@@ -260,3 +260,35 @@ async def test_trip_pinned_charger_swap(auth_client):
     plan2 = r.json()
     assert plan2["feasible"], plan2
     assert plan2["stops"][0]["charger"]["id"] == alt_id
+
+
+async def test_dashboard_stats(auth_client):
+    await seed_chargers(auth_client)
+    v = await add_vehicle(auth_client, soc=70)
+    r = await auth_client.get("/chargers/nearby", params={**BLR, "radius_km": 15})
+    cid = r.json()[3]["id"]
+    # one full session + one report
+    sid = (await auth_client.post("/chargers/sessions/start", json={"charger_id": cid, "vehicle_id": v["id"]})).json()["session_id"]
+    await auth_client.post(f"/chargers/sessions/{sid}/end", json={"successful": True, "energy_kwh": 18.5})
+    r = await auth_client.get("/auth/me/stats")
+    assert r.status_code == 200, r.text
+    s = r.json()
+    assert s["sessions_total"] >= 1
+    assert s["sessions_successful"] >= 1
+    assert s["energy_kwh"] >= 18.5
+    assert s["chargers_visited"] >= 1
+    assert s["vehicles_count"] >= 1
+    assert s["recent_sessions"][0]["energy_kwh"] == 18.5
+    assert s["est_cost_inr"] > 0
+
+
+async def test_manual_vehicle_creation(auth_client):
+    r = await auth_client.post("/vehicles", json={
+        "make": "Citroen", "model": "eC3", "category": "4W",
+        "battery_kwh": 29.2, "efficiency_wh_per_km": 112,
+        "connector_types": ["CCS2", "Type2_AC"], "max_dc_power_kw": 30,
+        "battery_soc": 64,
+    })
+    assert r.status_code == 201, r.text
+    v = r.json()
+    assert v["make"] == "Citroen" and v["battery_kwh"] == 29.2
