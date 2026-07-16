@@ -82,7 +82,12 @@ def to_charger(poi: dict) -> Optional[Charger]:
     )
 
 
-async def run(lat: float, lng: float, radius_km: float, max_results: int):
+PROXIMITY_DEDUPE_KM = 0.075  # skip if an existing charger sits within 75 m
+
+
+async def run(lat: float, lng: float, radius_km: float, max_results: int = 500) -> int:
+    from ..services.geo import haversine_km
+
     await init_db()
     pois = await fetch(lat, lng, radius_km, max_results)
     async with SessionLocal() as db:
@@ -90,17 +95,22 @@ async def run(lat: float, lng: float, radius_km: float, max_results: int):
             (await db.execute(select(Charger.external_id).where(Charger.external_id.isnot(None))))
             .scalars().all()
         )
+        existing_pos = (await db.execute(select(Charger.lat, Charger.lng))).all()
         added = 0
         for poi in pois:
             c = to_charger(poi)
             if c is None or c.external_id in existing:
                 continue
+            if any(haversine_km(c.lat, c.lng, la, ln) < PROXIMITY_DEDUPE_KM for la, ln in existing_pos):
+                continue  # already covered by another source
             db.add(c)
             await db.flush()
             db.add(ReliabilityScore(charger_id=c.id, score=0.5))  # neutral until verified
+            existing_pos.append((c.lat, c.lng))
             added += 1
         await db.commit()
-    print(f"Imported {added} chargers from Open Charge Map ({len(pois)} fetched).")
+    print(f"OCM: imported {added} chargers ({len(pois)} fetched).")
+    return added
 
 
 if __name__ == "__main__":

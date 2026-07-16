@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import init_db
-from .routers import auth_router, chargers_router, trips_router, vehicles_router
+from .routers import admin_router, auth_router, chargers_router, trips_router, vehicles_router
 
 
 @asynccontextmanager
@@ -14,6 +14,10 @@ async def lifespan(app: FastAPI):
     if settings.seed_on_start:
         from .seed.seed_data import seed
         await seed()
+    if settings.import_ncr_on_start:
+        import asyncio
+        from .seed.regions import import_regions
+        asyncio.create_task(import_regions())  # background; API serves immediately
     yield
 
 
@@ -35,6 +39,7 @@ app.include_router(auth_router.router)
 app.include_router(vehicles_router.router)
 app.include_router(chargers_router.router)
 app.include_router(trips_router.router)
+app.include_router(admin_router.router)
 
 
 @app.get("/health")

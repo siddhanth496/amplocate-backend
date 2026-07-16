@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # Seed demo chargers on startup if the table is empty (useful on fresh deploys)
     seed_on_start: bool = False
 
+    # Import real charger data for Delhi NCR (OCM + OSM) in the background on startup
+    import_ncr_on_start: bool = False
+
     google_maps_api_key: str = ""
     ocm_api_key: str = ""
 
