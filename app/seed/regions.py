@@ -33,7 +33,10 @@ async def import_regions(regions=NCR_REGIONS) -> dict:
     import traceback
     from datetime import datetime, timezone
 
-    totals = {"ocm": 0, "osm": 0, "errors": [], "started_at": datetime.now(timezone.utc).isoformat()}
+    from ..config import settings
+    from . import google_places_import
+
+    totals = {"ocm": 0, "osm": 0, "google": 0, "errors": [], "started_at": datetime.now(timezone.utc).isoformat()}
     STATUS["running"] = True
     try:
         for name, lat, lng, radius in regions:
@@ -48,6 +51,12 @@ async def import_regions(regions=NCR_REGIONS) -> dict:
             except Exception as e:  # noqa: BLE001
                 totals["errors"].append(f"OSM {name}: {type(e).__name__}: {e}")
                 print(f"OSM {name} failed: {e}", flush=True)
+            if settings.google_maps_api_key:
+                try:
+                    totals["google"] += await google_places_import.run(lat, lng, radius)
+                except Exception as e:  # noqa: BLE001
+                    totals["errors"].append(f"Google {name}: {type(e).__name__}: {e}")
+                    print(f"Google {name} failed: {e}", flush=True)
     except Exception:  # noqa: BLE001 — never lose the traceback silently
         totals["errors"].append(traceback.format_exc())
         print(traceback.format_exc(), flush=True)

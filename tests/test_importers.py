@@ -78,3 +78,46 @@ def test_ncr_grid_covers_major_cities():
     names = " ".join(r[0] for r in NCR_REGIONS)
     for city in ("Delhi", "Gurugram", "Noida", "Ghaziabad", "Faridabad"):
         assert city in names
+
+
+def test_google_places_mapping():
+    from app.seed.google_places_import import to_charger
+    place = {
+        "id": "ChIJabc123",
+        "displayName": {"text": "Tata Power Charging Station"},
+        "formattedAddress": "Connaught Place, New Delhi",
+        "location": {"latitude": 28.6315, "longitude": 77.2196},
+        "businessStatus": "OPERATIONAL",
+        "evChargeOptions": {
+            "connectorCount": 4,
+            "connectorAggregation": [
+                {"type": "EV_CONNECTOR_TYPE_CCS_COMBO_2", "maxChargeRateKw": 60, "count": 2},
+                {"type": "EV_CONNECTOR_TYPE_TYPE_2", "maxChargeRateKw": 22, "count": 2},
+                {"type": "EV_CONNECTOR_TYPE_TESLA", "maxChargeRateKw": 250, "count": 1},  # unmapped → dropped
+            ],
+        },
+    }
+    c = to_charger(place)
+    assert c.external_id == "gplace-ChIJabc123"
+    types = {x["type"]: x for x in c.connectors}
+    assert types["CCS2"]["power_kw"] == 60 and types["CCS2"]["count"] == 2
+    assert "Type2_AC" in types and "TESLA" not in str(types)
+
+
+def test_google_places_skips_closed_and_defaults_connectors():
+    from app.seed.google_places_import import to_charger
+    assert to_charger({
+        "id": "x", "location": {"latitude": 1, "longitude": 2},
+        "businessStatus": "CLOSED_PERMANENTLY",
+    }) is None
+    c = to_charger({"id": "y", "location": {"latitude": 28.5, "longitude": 77.1}})
+    assert c.connectors == [{"type": "Type2_AC", "power_kw": 7.4, "count": 1}]
+
+
+def test_google_tile_centers():
+    from app.seed.google_places_import import tile_centers
+    small = tile_centers(28.6, 77.2, 8)
+    assert small == [(28.6, 77.2, 8)]
+    big = tile_centers(28.6, 77.2, 25)
+    assert 2 <= len(big) <= 15
+    assert all(r <= 10 for _, _, r in big)

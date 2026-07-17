@@ -40,6 +40,19 @@ async def import_region(body: RegionImport, user: User = Depends(get_current_use
     return {"status": "started", "region": body.name}
 
 
+@router.post("/import/google", status_code=202)
+async def import_google(body: RegionImport, user: User = Depends(get_current_user)):
+    """Import/refresh EV chargers from the official Google Places API for a region.
+    Requires GOOGLE_MAPS_API_KEY (Places API New enabled). Run at least monthly —
+    Google's caching policy caps stored place data at ~30 days."""
+    _dev_only()
+    if not settings.google_maps_api_key:
+        raise HTTPException(400, "GOOGLE_MAPS_API_KEY is not configured on the server")
+    from ..seed.google_places_import import run as google_run
+    asyncio.create_task(google_run(body.lat, body.lng, body.radius_km))
+    return {"status": "started", "region": body.name, "source": "google_places"}
+
+
 @router.get("/import/status")
 async def import_status(user: User = Depends(get_current_user)):
     """Charger count + result of the last import run (incl. per-region errors)."""
@@ -60,4 +73,5 @@ async def import_status(user: User = Depends(get_current_user)):
         "import_running": STATUS["running"],
         "last_run": STATUS["last_run"],
         "ocm_api_key_configured": bool(settings.ocm_api_key),
+        "google_api_key_configured": bool(settings.google_maps_api_key),
     }
