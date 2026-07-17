@@ -57,6 +57,10 @@ async def import_regions(regions=NCR_REGIONS) -> dict:
                 except Exception as e:  # noqa: BLE001
                     totals["errors"].append(f"Google {name}: {type(e).__name__}: {e}")
                     print(f"Google {name} failed: {e}", flush=True)
+            # be polite to the free Overpass/OCM servers — rapid back-to-back
+            # region queries are what trigger 429 rate limits
+            import asyncio as _asyncio
+            await _asyncio.sleep(5)
     except Exception:  # noqa: BLE001 — never lose the traceback silently
         totals["errors"].append(traceback.format_exc())
         print(traceback.format_exc(), flush=True)

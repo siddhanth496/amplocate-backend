@@ -46,6 +46,11 @@ async def fetch(lat: float, lng: float, radius_km: float, max_results: int) -> l
         params["key"] = settings.ocm_api_key
     async with httpx.AsyncClient() as client:
         resp = await client.get("https://api.openchargemap.io/v3/poi", params=params, timeout=30)
+        if resp.status_code == 403:
+            raise RuntimeError(
+                "Open Charge Map requires an API key. Get a free one at "
+                "openchargemap.org (My Profile → My Applications) and set OCM_API_KEY."
+            )
         resp.raise_for_status()
         return resp.json()
 
