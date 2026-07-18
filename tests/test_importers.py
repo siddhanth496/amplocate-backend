@@ -121,3 +121,98 @@ def test_google_tile_centers():
     big = tile_centers(28.6, 77.2, 25)
     assert 2 <= len(big) <= 15
     assert all(r <= 10 for _, _, r in big)
+
+
+# ── Statiq importer ───────────────────────────────────────────────────────────
+def test_statiq_connector_mapping():
+    from app.seed.statiq_import import map_connector
+    assert map_connector("CCS-2") == "CCS2"
+    assert map_connector("Type 2") == "Type2_AC"
+    assert map_connector("CHAdeMO") == "CHAdeMO"
+    assert map_connector("GB/T") == "GB/T"
+    assert map_connector("Wall") == "Wall_3pin"
+    assert map_connector("Smart Plug 881") == "Wall_3pin"
+    assert map_connector("Tesla NACS") is None
+    assert map_connector(None) is None
+
+
+def test_statiq_num_parsing():
+    from app.seed.statiq_import import _num
+    assert _num("₹ 24.15") == 24.15
+    assert _num("120 kW") == 120.0
+    assert _num(22.99) == 22.99
+    assert _num(None) is None
+
+
+def test_statiq_to_charger_aggregates_and_prices():
+    from app.seed.statiq_import import to_charger
+    station = {
+        "id": "4741", "name": "Monk Mansion", "operator": "Statiq",
+        "address": "Electronic City", "city": "Bengaluru",
+        "lat": 12.8452, "lng": 77.6602, "available": True,
+        "amenities": ["Restroom", "Cafe"],
+        "chargers": [
+            {"current": "DC", "power_kw": 120, "price": 24.15,
+             "connectors": [{"type": "CCS-2", "status": "charging"},
+                            {"type": "CCS-2", "status": "available"}]},
+            {"current": "DC", "power_kw": 120, "price": 22.99,
+             "connectors": [{"type": "CCS-2", "status": "available"},
+                            {"type": "CCS-2", "status": "available"}]},
+            {"current": "AC", "power_kw": 3.3, "price": 22.99,
+             "connectors": [{"type": "Wall", "status": "available"}]},
+        ],
+    }
+    c = to_charger(station)
+    assert c.external_id == "statiq-4741"
+    assert c.operator == "Statiq"
+    types = {x["type"]: x for x in c.connectors}
+    assert types["CCS2"]["count"] == 4 and types["CCS2"]["power_kw"] == 120
+    assert types["Wall_3pin"]["count"] == 1
+    assert c.price_per_kwh == 22.99          # min across chargers
+    assert c.status == "online"              # available connectors present
+    assert c.amenities == ["restroom", "cafe"]
+
+
+def test_statiq_to_charger_offline_and_defaults():
+    from app.seed.statiq_import import to_charger
+    # explicitly unavailable, no connectors → offline + fallback connector
+    c = to_charger({"id": "9", "lat": 1.0, "lng": 2.0, "available": False, "chargers": []})
+    assert c.status == "offline"
+    assert c.connectors == [{"type": "Type2_AC", "power_kw": 7.4, "count": 1}]
+    # missing coordinates → unimportable
+    assert to_charger({"id": "9", "chargers": []}) is None
+
+
+def test_statiq_parse_next_data():
+    import json
+    from app.seed.statiq_import import parse_station_page
+    payload = {"props": {"pageProps": {"station": {
+        "id": 4741, "name": "Monk Mansion", "city": "Bengaluru",
+        "address": "Electronic City", "latitude": 12.8452, "longitude": 77.6602,
+        "amenities": [{"name": "Cafe"}],
+        "chargers": [{"currentType": "DC", "power": "120 kW", "price": "₹ 24.15",
+                      "connectors": [{"connectorType": "CCS-2", "status": "available"}]}],
+    }}}}
+    html = f'<html><body><script id="__NEXT_DATA__" type="application/json">{json.dumps(payload)}</script></body></html>'
+    norm = parse_station_page(html, "https://www.statiq.in/x-ev-charging-station-id-4741")
+    assert norm["id"] == "4741"
+    assert norm["city"] == "Bengaluru"
+    assert round(norm["lat"], 4) == 12.8452
+    assert norm["chargers"][0]["power_kw"] == 120.0
+    assert norm["chargers"][0]["connectors"][0]["type"] == "CCS-2"
+
+
+def test_statiq_maps_link_coord_fallback():
+    import json
+    from app.seed.statiq_import import parse_station_page
+    # station node lacks coords; they must be recovered from the directions link
+    payload = {"props": {"pageProps": {"station": {
+        "id": 55, "name": "No-Geo Station", "chargers": [],
+    }}}}
+    html = (
+        f'<script id="__NEXT_DATA__" type="application/json">{json.dumps(payload)}</script>'
+        '<a href="https://www.google.com/maps/dir/?api=1&destination=19.076,72.8777">Get directions</a>'
+    )
+    norm = parse_station_page(html, "https://www.statiq.in/x-ev-charging-station-id-55")
+    assert norm is not None
+    assert norm["lat"] == 19.076 and norm["lng"] == 72.8777

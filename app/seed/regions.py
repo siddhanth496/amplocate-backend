@@ -24,12 +24,42 @@ def bbox_around(lat: float, lng: float, radius_km: float) -> tuple[float, float,
     return lat - dlat, lng - dlng, lat + dlat, lng + dlng  # south, west, north, east
 
 
+# Regions auto-imported on first boot when the DB is empty (keyless OSM only).
+# Kept small so a cold start populates quickly; run /admin/import/ncr for full
+# coverage. Covers the app's two default map centres (Bengaluru + Delhi).
+BOOTSTRAP_REGIONS = [
+    ("Bengaluru", 12.9716, 77.5946, 18),
+    ("Delhi Central", 28.6139, 77.2090, 18),
+]
+
 # In-memory status for the /admin/import/status endpoint
 STATUS: dict = {"running": False, "last_run": None}
 
 
-async def import_regions(regions=NCR_REGIONS) -> dict:
-    """Run both importers per region. Idempotent: external-id + 75 m proximity dedupe."""
+async def bootstrap_if_empty() -> dict:
+    """If there are no chargers yet, import default regions from OSM (no API key).
+
+    Safe to call on every startup — it's a no-op once data exists.
+    """
+    from sqlalchemy import func, select
+
+    from ..database import SessionLocal
+    from ..models import Charger
+
+    async with SessionLocal() as db:
+        count = (await db.execute(select(func.count(Charger.id)))).scalar()
+    if count:
+        return {"skipped": True, "existing": count}
+    print(f"Bootstrap: DB empty — importing {len(BOOTSTRAP_REGIONS)} region(s) from OSM.", flush=True)
+    return await import_regions(BOOTSTRAP_REGIONS, osm_only=True)
+
+
+async def import_regions(regions=NCR_REGIONS, osm_only: bool = False) -> dict:
+    """Run the importers per region. Idempotent: external-id + 75 m proximity dedupe.
+
+    ``osm_only`` skips OCM/Google (which need API keys) so a keyless bootstrap can
+    still populate data from OpenStreetMap alone.
+    """
     import traceback
     from datetime import datetime, timezone
 
@@ -40,18 +70,19 @@ async def import_regions(regions=NCR_REGIONS) -> dict:
     STATUS["running"] = True
     try:
         for name, lat, lng, radius in regions:
-            try:
-                totals["ocm"] += await ocm_import.run(lat, lng, radius, max_results=500)
-            except Exception as e:  # noqa: BLE001 — one source failing shouldn't kill the run
-                totals["errors"].append(f"OCM {name}: {type(e).__name__}: {e}")
-                print(f"OCM {name} failed: {e}", flush=True)
+            if not osm_only:
+                try:
+                    totals["ocm"] += await ocm_import.run(lat, lng, radius, max_results=500)
+                except Exception as e:  # noqa: BLE001 — one source failing shouldn't kill the run
+                    totals["errors"].append(f"OCM {name}: {type(e).__name__}: {e}")
+                    print(f"OCM {name} failed: {e}", flush=True)
             try:
                 south, west, north, east = bbox_around(lat, lng, radius)
                 totals["osm"] += await overpass_import.run(south, west, north, east)
             except Exception as e:  # noqa: BLE001
                 totals["errors"].append(f"OSM {name}: {type(e).__name__}: {e}")
                 print(f"OSM {name} failed: {e}", flush=True)
-            if settings.google_maps_api_key:
+            if not osm_only and settings.google_maps_api_key:
                 try:
                     totals["google"] += await google_places_import.run(lat, lng, radius)
                 except Exception as e:  # noqa: BLE001

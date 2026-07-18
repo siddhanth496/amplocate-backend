@@ -13,14 +13,31 @@ services:
         fromDatabase:
           name: amplocate-db
           property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: amplocate-cache
+          property: connectionString
       - key: JWT_SECRET
         generateValue: true
       - key: DEV_MODE
         value: "true"
+      # No demo data in production — data comes from the live importers.
       - key: SEED_ON_START
+        value: "false"
+      # Keyless first-boot bootstrap from OpenStreetMap.
+      - key: IMPORT_ON_EMPTY
         value: "true"
+      # Set OCM_API_KEY / GOOGLE_MAPS_API_KEY in the dashboard, then flip on for
+      # full multi-source Delhi-NCR coverage.
       - key: IMPORT_NCR_ON_START
-        value: "true"
+        value: "false"
+
+  # Render managed Redis (Key Value). Free plan; internal traffic only.
+  - type: keyvalue
+    name: amplocate-cache
+    plan: free
+    ipAllowList: []
 
 databases:
   - name: amplocate-db

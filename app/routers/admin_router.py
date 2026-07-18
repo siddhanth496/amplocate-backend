@@ -1,6 +1,7 @@
 """Data-import admin endpoints. Available only in dev mode (demo deployments);
 lock behind a proper admin role before production hardening."""
 import asyncio
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -53,6 +54,30 @@ async def import_google(body: RegionImport, user: User = Depends(get_current_use
     return {"status": "started", "region": body.name, "source": "google_places"}
 
 
+class StatiqImport(BaseModel):
+    city: Optional[str] = Field(default=None, description="city page slug, e.g. bengaluru-ev-charging-station")
+    sitemap: bool = Field(default=False, description="discover every station via sitemap.xml")
+    max: int = Field(default=0, ge=0, description="cap number of stations (0 = no cap)")
+
+
+@router.post("/import/statiq", status_code=202)
+async def import_statiq(body: StatiqImport, user: User = Depends(get_current_user)):
+    """Import Statiq stations from statiq.in (public pages).
+
+    Pass a `city` slug for a single city, or `sitemap: true` for the whole
+    network. Crawling is permitted by Statiq's robots.txt; keep it polite and
+    review their Terms of Service before commercial reuse. See STATIQ_IMPORT.md."""
+    _dev_only()
+    if not body.city and not body.sitemap:
+        raise HTTPException(400, "Provide a `city` slug or set `sitemap: true`")
+    from ..seed.statiq_import import run as statiq_run
+    asyncio.create_task(
+        statiq_run(sitemap=body.sitemap, city=body.city, max_results=body.max,
+                   concurrency=settings.statiq_import_concurrency)
+    )
+    return {"status": "started", "source": "statiq", "scope": body.city or "sitemap"}
+
+
 @router.get("/import/status")
 async def import_status(user: User = Depends(get_current_user)):
     """Charger count + result of the last import run (incl. per-region errors)."""
@@ -67,9 +92,13 @@ async def import_status(user: User = Depends(get_current_user)):
         imported = (
             await db.execute(select(func.count(Charger.id)).where(Charger.external_id.isnot(None)))
         ).scalar()
+        statiq = (
+            await db.execute(select(func.count(Charger.id)).where(Charger.external_id.like("statiq-%")))
+        ).scalar()
     return {
         "total_chargers": total,
         "imported_chargers": imported,
+        "statiq_chargers": statiq,
         "import_running": STATUS["running"],
         "last_run": STATUS["last_run"],
         "ocm_api_key_configured": bool(settings.ocm_api_key),

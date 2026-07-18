@@ -12,14 +12,27 @@ class Settings(BaseSettings):
     dev_mode: bool = True
     otp_expiry_minutes: int = 5
 
-    # Seed demo chargers on startup if the table is empty (useful on fresh deploys)
+    # DEV/TEST ONLY: load demo chargers on startup. Off by default — production
+    # data comes from the live importers, never from hard-coded demo rows.
     seed_on_start: bool = False
 
     # Import real charger data for Delhi NCR (OCM + OSM) in the background on startup
     import_ncr_on_start: bool = False
 
+    # On startup, if the chargers table is empty, auto-populate the default
+    # regions from OpenStreetMap/Overpass (no API key required). This is what
+    # replaces the old demo seed as the "there's data on first boot" mechanism.
+    import_on_empty: bool = True
+
+    # Redis response cache (leave empty to disable — the app still works).
+    redis_url: str = ""
+    cache_ttl_seconds: int = 90
+
     google_maps_api_key: str = ""
     ocm_api_key: str = ""
+
+    # Statiq website importer (public pages; robots.txt permits crawling)
+    statiq_import_concurrency: int = 4
 
     # Trip planner constants (see trip planning spec)
     reserve_soc: float = 15.0

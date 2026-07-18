@@ -1,0 +1,55 @@
+# Local dev stack for amplocate-backend: API + Postgres + Redis.
+#   docker compose up --build
+# On first boot the API auto-imports chargers for Bengaluru + Delhi from
+# OpenStreetMap (no API keys needed), so the map has real data immediately.
+
+services:
+  api:
+    build:
+      context: .
+    ports:
+      - "8000:8000"
+    environment:
+      # postgres:// is auto-normalised to postgresql+asyncpg:// by the app
+      DATABASE_URL: postgresql://user:password@db:5432/evplatform
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: dev-secret-change-me
+      DEV_MODE: "true"
+      IMPORT_ON_EMPTY: "true"
+      # Add these to widen coverage beyond OSM:
+      OCM_API_KEY: "${OCM_API_KEY:-}"
+      GOOGLE_MAPS_API_KEY: "${GOOGLE_MAPS_API_KEY:-}"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: evplatform
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d evplatform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:

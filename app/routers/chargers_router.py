@@ -3,6 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from .. import cache
 from ..auth import get_current_user
 from ..database import get_db
 from ..models import ChargeSession, Charger, Report, User, Vehicle, utcnow
@@ -46,15 +47,7 @@ async def nearby(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    min_lat, max_lat, min_lng, max_lng = bounding_box(lat, lng, radius_km)
-    rows = (
-        await db.execute(
-            select(Charger)
-            .options(selectinload(Charger.reliability))
-            .where(Charger.lat.between(min_lat, max_lat), Charger.lng.between(min_lng, max_lng))
-        )
-    ).scalars().all()
-
+    # Validate vehicle ownership up front so a cache hit can't leak a 404 path.
     vehicle_connectors = None
     if vehicle_id:
         v = (
@@ -63,6 +56,26 @@ async def nearby(
         if v is None:
             raise HTTPException(404, "Vehicle not found")
         vehicle_connectors = set(v.connector_types)
+
+    # Cache the expensive geo scan. Coords are quantised to ~100 m so small map
+    # nudges reuse the same entry. Reliability decays slowly, so a short TTL is
+    # fine; writes (reports/sessions) invalidate the whole prefix immediately.
+    cache_key = (
+        f"{cache.NEARBY_PREFIX}{round(lat, 3)}:{round(lng, 3)}:{radius_km}:"
+        f"{connector_type}:{min_power_kw}:{min_reliability}:{vehicle_id}:{limit}"
+    )
+    cached = await cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+
+    min_lat, max_lat, min_lng, max_lng = bounding_box(lat, lng, radius_km)
+    rows = (
+        await db.execute(
+            select(Charger)
+            .options(selectinload(Charger.reliability))
+            .where(Charger.lat.between(min_lat, max_lat), Charger.lng.between(min_lng, max_lng))
+        )
+    ).scalars().all()
 
     results = []
     for c in rows:
@@ -81,7 +94,9 @@ async def nearby(
     # compatible chargers first, then by distance (PRD 7.3)
     results.sort(key=lambda r: (not r["compatible"] if r["compatible"] is not None else False,
                                 r["distance_km"]))
-    return results[:limit]
+    results = results[:limit]
+    await cache.set_json(cache_key, results)
+    return results
 
 
 @router.get("/{charger_id}", response_model=ChargerDetail)
@@ -138,6 +153,7 @@ async def create_report(
     db.add(report)
     await db.commit()
     await reliability.recompute(db, charger_id)
+    await cache.delete_prefix(cache.NEARBY_PREFIX)  # reliability changed
     await db.refresh(report)
     return report
 
@@ -182,4 +198,5 @@ async def end_session(
     ))
     await db.commit()
     await reliability.recompute(db, s.charger_id)
+    await cache.delete_prefix(cache.NEARBY_PREFIX)  # reliability changed
     return {"ok": True}
